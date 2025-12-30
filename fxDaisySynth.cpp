@@ -10,7 +10,6 @@ using namespace daisysp;
 static DaisyPod pod;
 static Oscillator osc, lfo;
 static MoogLadder flt, fltLow;
-static AdEnv ad;
 MidiUsbHandler midi;
 static Parameter pitchParam, cutoffParam, resParam, lfoParam;
 
@@ -20,16 +19,20 @@ struct voice
     uint8_t velocity;
     float gain = 0.0;
     bool isPlaying = false;
-    // OscillatorBank osc;
     Oscillator osc;
     Adsr env;
 };
 std::map<uint8_t, voice> voices;
 
 int wave, mode;
-float vibrato, oscFreq, lfoFreq, lfoAmp, attack, release, cutoff, res;
+float vibrato, oscFreq, lfoFreq, lfoAmp, cutoff, res;
 float oldk1, oldk2, k1, k2;
 bool selfCycle;
+// ADSR Params
+float attack = 0.2f;
+float decay = 0.8f;
+float sustain = 0.4f;
+float release = 0.2f;
 
 void ConditionalParameter(float oldVal,
                           float newVal,
@@ -40,18 +43,15 @@ void Controls();
 
 void NextSamples(float &sig)
 {
-    float ad_out = ad.Process();
     vibrato = lfo.Process();
 
-    osc.SetFreq(oscFreq + vibrato);
-
-    // sig = osc.Process();
     //  Sum the voices and output.
+    sig = 0.0f;
     for (auto it = voices.begin(); it != voices.end(); ++it)
     {
-
-        // apply adsr envelope.
-        float voiceSig = it->second.gain * it->second.env.Process(it->second.isPlaying) * (it->second.osc.Process());
+        // apply vibrato and adsr envelope.
+        it->second.osc.SetFreq(mtof(it->second.note) + vibrato);
+        float voiceSig = it->second.env.Process(it->second.isPlaying) * (it->second.osc.Process());
         sig += voiceSig;
 
         if (!it->second.isPlaying && it->second.env.Process(it->second.isPlaying) < 0.0005f)
@@ -94,7 +94,6 @@ void NextSamples(float &sig)
     */
 
     sig = flt.Process(sig);
-    // sig *= ad_out;
 }
 
 static void AudioCallback(AudioHandle::InterleavingInputBuffer in,
@@ -135,19 +134,13 @@ void HandleMidiMessage(MidiEvent m)
         if (m.data[1] != 0)
         {
             note_msg = m.AsNoteOn();
-            osc.SetFreq(mtof(note_msg.note));
-            oscFreq = mtof(note_msg.note);
-            osc.SetAmp((note_msg.velocity / 127.0f));
-            // ad.Trigger();
-
             if (note_msg.velocity != 0)
             {
-                // osc.SetFreq(mtof(note_msg.note));
                 //  voice v = getAvailableVoice();
                 voice v;
                 if (voices.count(note_msg.note)) {
                     v = voices[note_msg.note];
-                    v.env.Retrigger(false);
+                    v.env.Retrigger(true);
                 }
                 else
                 {
@@ -161,18 +154,15 @@ void HandleMidiMessage(MidiEvent m)
                 v.gain = note_msg.velocity / 127.0f;
                 v.note = note_msg.note;
                 v.velocity = note_msg.velocity;
-                // v.osc.SetAmplitudes(amplitudes);
                 v.osc.SetFreq(mtof(note_msg.note));
                 v.osc.SetWaveform(wave);
-                // v.osc.SetGain(mtof(note_msg.velocity)/UINT8_MAX);
                 v.osc.SetAmp(note_msg.velocity / 127.0f);
                 v.isPlaying = true;
-                // @todo: make these configurable parameters
                 v.env.Init(pod.AudioSampleRate());
-                v.env.SetAttackTime(0.6f);
-                v.env.SetDecayTime(1.0f);
-                v.env.SetReleaseTime(0.7f);
-                v.env.SetSustainLevel(v.gain * 0.2f);
+                v.env.SetAttackTime(attack);
+                v.env.SetDecayTime(decay);
+                v.env.SetReleaseTime(release);
+                v.env.SetSustainLevel(v.gain * sustain);
                 voices.insert(std::pair<u_int8_t, voice>(note_msg.note, v));
             }
         }
@@ -180,15 +170,10 @@ void HandleMidiMessage(MidiEvent m)
     break;
     case NoteOff:
     {
-        // Bring amplitudes down to zero.
         auto note_msg = m.AsNoteOff();
-        // voices.SetAmplitudes(ampZero);
         if (voices.count(note_msg.note))
         {
-            // voices[note_msg.note].osc.SetAmplitudes(ampZero);
-            // voices[note_msg.note].osc.SetAmp(0.0);
             voices[note_msg.note].isPlaying = false;
-            // voices.erase(note_msg.note);
         }
     }
     break;
@@ -239,26 +224,7 @@ int main(void)
     osc.Init(sample_rate);
     flt.Init(sample_rate);
     fltLow.Init(sample_rate);
-    ad.Init(sample_rate);
     lfo.Init(sample_rate);
-
-    // Init voices
-    for (int i = 0; i < 4; i++)
-    {
-        voices[i].note = 0;
-        voices[i].velocity = 0;
-        voices[i].gain = 0.0;
-        voices[i].isPlaying = false;
-        voices[i].osc.Init(sample_rate);
-        // voices[i].osc.SetAmplitudes(ampZero);
-        // voices[i].osc.SetGain(1.0);
-        voices[i].osc.SetAmp(1.0);
-        voices[i].env.Init(sample_rate);
-        voices[i].env.SetAttackTime(0.6f);
-        voices[i].env.SetDecayTime(2.0f);
-        voices[i].env.SetReleaseTime(1.0f);
-        voices[i].env.SetSustainLevel(0.6f);
-    }
 
     // Set filter parameters
     flt.SetFreq(10000);
@@ -278,11 +244,6 @@ int main(void)
     lfo.SetAmp(1);
 
     // Set envelope parameters
-    ad.SetTime(ADENV_SEG_ATTACK, 0.01);
-    ad.SetTime(ADENV_SEG_DECAY, .8);
-    ad.SetMax(1);
-    ad.SetMin(0);
-    ad.SetCurve(0.5);
 
     // set parameter parameters
     cutoffParam.Init(pod.knob1, 100, 20000, cutoffParam.LOGARITHMIC);
@@ -367,8 +328,6 @@ void UpdateKnobs()
     case 1:
         ConditionalParameter(oldk1, k1, attack, pod.knob1.Process());
         ConditionalParameter(oldk2, k2, release, pod.knob2.Process());
-        ad.SetTime(ADENV_SEG_ATTACK, attack);
-        ad.SetTime(ADENV_SEG_DECAY, release);
         break;
     case 2:
         ConditionalParameter(oldk1, k1, lfoFreq, lfoParam.Process());
@@ -393,9 +352,9 @@ void UpdateLeds()
 
 void UpdateButtons()
 {
-    if (pod.button1.RisingEdge() || (selfCycle && !ad.IsRunning()))
+    if (pod.button1.RisingEdge())
     {
-        ad.Trigger();
+        // @todo: use button 1 for something.
     }
 
     if (pod.button2.RisingEdge())
