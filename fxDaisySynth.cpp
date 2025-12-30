@@ -51,8 +51,8 @@ void NextSamples(float &sig)
     {
 
         // apply adsr envelope.
-        float voiceSig = it->second.env.Process(it->second.isPlaying) * (it->second.osc.Process());
-        sig += flt.Process(voiceSig);
+        float voiceSig = it->second.gain * it->second.env.Process(it->second.isPlaying) * (it->second.osc.Process());
+        sig += voiceSig;
 
         if (!it->second.isPlaying && it->second.env.Process(it->second.isPlaying) < 0.0005f)
         {
@@ -151,28 +151,28 @@ void HandleMidiMessage(MidiEvent m)
                 }
                 else
                 {
-                    voice v = {
+                    v = {
                         note_msg.note,
                         note_msg.velocity,
-                        mtof(note_msg.velocity / 127.0f),
+                        note_msg.velocity / 127.0f,
                         true};
                     v.osc.Init(pod.AudioSampleRate());
                 }
-                v.gain = mtof(note_msg.velocity / UINT8_MAX);
+                v.gain = note_msg.velocity / 127.0f;
                 v.note = note_msg.note;
                 v.velocity = note_msg.velocity;
                 // v.osc.SetAmplitudes(amplitudes);
                 v.osc.SetFreq(mtof(note_msg.note));
                 v.osc.SetWaveform(wave);
                 // v.osc.SetGain(mtof(note_msg.velocity)/UINT8_MAX);
-                v.osc.SetAmp(mtof(note_msg.velocity) / UINT8_MAX);
+                v.osc.SetAmp(note_msg.velocity / 127.0f);
                 v.isPlaying = true;
                 // @todo: make these configurable parameters
                 v.env.Init(pod.AudioSampleRate());
                 v.env.SetAttackTime(0.6f);
-                v.env.SetDecayTime(2.0f);
-                v.env.SetReleaseTime(1.0f);
-                v.env.SetSustainLevel(v.gain * 0.6f);
+                v.env.SetDecayTime(1.0f);
+                v.env.SetReleaseTime(0.7f);
+                v.env.SetSustainLevel(v.gain * 0.2f);
                 voices.insert(std::pair<u_int8_t, voice>(note_msg.note, v));
             }
         }
