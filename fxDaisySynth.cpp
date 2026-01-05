@@ -139,18 +139,14 @@ void HandleMidiMessage(MidiEvent m)
                 //  voice v = getAvailableVoice();
                 voice v;
                 if (voices.count(note_msg.note)) {
-                    v = voices[note_msg.note];
-                    v.env.Retrigger(true);
+                    voices.erase(note_msg.note);
                 }
-                else
-                {
-                    v = {
-                        note_msg.note,
-                        note_msg.velocity,
-                        note_msg.velocity / 127.0f,
-                        true};
-                    v.osc.Init(pod.AudioSampleRate());
-                }
+                v = {
+                    note_msg.note,
+                    note_msg.velocity,
+                    note_msg.velocity / 127.0f,
+                    true};
+                v.osc.Init(pod.AudioSampleRate());
                 v.gain = note_msg.velocity / 127.0f;
                 v.note = note_msg.note;
                 v.velocity = note_msg.velocity;
