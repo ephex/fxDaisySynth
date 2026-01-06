@@ -7,9 +7,11 @@
 using namespace daisy;
 using namespace daisysp;
 
+AdEnv env;
 static DaisyPod pod;
 static Oscillator osc, lfo;
 static MoogLadder flt, fltLow;
+Metro tick;
 MidiUsbHandler midi;
 static Parameter pitchParam, cutoffParam, resParam, lfoParam;
 
@@ -24,6 +26,15 @@ struct voice
 };
 std::map<uint8_t, voice> voices;
 
+struct seqStep
+{
+    uint8_t note;
+    bool active;
+    float decay;
+};
+uint8_t step;
+seqStep sequence[16];
+
 int wave, mode;
 float vibrato, oscFreq, lfoFreq, lfoAmp, cutoff, res;
 float oldk1, oldk2, k1, k2;
@@ -33,6 +44,10 @@ float attack = 0.2f;
 float decay = 0.8f;
 float sustain = 0.4f;
 float release = 0.2f;
+
+// Sequencer vars
+float env_out = 0;
+float tickFreq = 8.0f;
 
 void ConditionalParameter(float oldVal,
                           float newVal,
@@ -46,7 +61,6 @@ void NextSamples(float &sig)
     vibrato = lfo.Process();
 
     //  Sum the voices and output.
-    sig = 0.0f;
     for (auto it = voices.begin(); it != voices.end(); ++it)
     {
         // apply vibrato and adsr envelope.
@@ -60,7 +74,7 @@ void NextSamples(float &sig)
         }
     }
 
-    // My attempt at the "ResBass" feature on the Moog Messenger.
+    // My attempt at a "ResBass"-like feature.
     // At a certain low frequency threshold, start re-introducing
     // the raw signal but passed through a second filter with
     // same cutoff but zero resonance.
@@ -93,6 +107,30 @@ void NextSamples(float &sig)
     }
     */
 
+    // Step sequencer.
+    env_out = env.Process();
+    osc.SetAmp(env_out);
+    sig += osc.Process();
+    if (tick.Process())
+    {
+        step++;
+        step %= 16;
+        if (sequence[step].active)
+        {
+            env.Trigger();
+        }
+    }
+
+    if (sequence[step].active)
+    {
+        env.SetTime(ADENV_SEG_DECAY, sequence[step].decay);
+        osc.SetFreq(mtof(sequence[step].note));
+        if (!env.IsRunning())
+        {
+            env.Trigger();
+        }
+    }
+
     sig = flt.Process(sig);
 }
 
@@ -104,7 +142,7 @@ static void AudioCallback(AudioHandle::InterleavingInputBuffer in,
 
     for (size_t i = 0; i < size; i += 2)
     {
-        float sig;
+        float sig = 0;
         NextSamples(sig);
 
         // left out
@@ -120,6 +158,55 @@ void HandleMidiMessage(MidiEvent m)
 {
     switch (m.type)
     {
+    case ControlChange:
+    {
+        ControlChangeEvent cc_msg = m.AsControlChange();
+        switch (cc_msg.control_number)
+        {
+        case 1:
+            // CC 1 for cutoff.
+            flt.SetFreq(mtof((float)cc_msg.value));
+            fltLow.SetFreq(mtof((float)cc_msg.value) + 100.0f);
+            break;
+        case 2:
+            // CC 2 for res.
+            flt.SetRes(((float)cc_msg.value / 127.0f));
+            break;
+        default:
+            break;
+        }
+        //
+        // Sequencer control numbers range from 102 to 117
+        if (cc_msg.control_number >= 102 && cc_msg.control_number <= 117)
+        {
+            if (cc_msg.value > 0)
+            {
+                // Get currently pressed notes.
+                uint8_t currNotes = 0;
+                if (!voices.empty())
+                {
+                    for (auto it = voices.begin(); it != voices.end(); ++it)
+                    {
+                        if (it->second.isPlaying)
+                        {
+                            currNotes = it->second.note;
+                        }
+                    }
+                    if (currNotes > 0)
+                    {
+                        sequence[cc_msg.control_number - 102].active = true;
+                        sequence[cc_msg.control_number - 102].note = currNotes;
+                        sequence[cc_msg.control_number - 102].decay = 0.2;
+                    }
+                }
+                else
+                {
+                    sequence[cc_msg.control_number - 102].active = false;
+                }
+            }
+        }
+        break;
+    }
     case NoteOn:
     {
         NoteOnEvent note_msg = m.AsNoteOn();
@@ -138,7 +225,8 @@ void HandleMidiMessage(MidiEvent m)
             {
                 //  voice v = getAvailableVoice();
                 voice v;
-                if (voices.count(note_msg.note)) {
+                if (voices.count(note_msg.note))
+                {
                     voices.erase(note_msg.note);
                 }
                 v = {
@@ -173,25 +261,6 @@ void HandleMidiMessage(MidiEvent m)
         }
     }
     break;
-    case ControlChange:
-    {
-        ControlChangeEvent p = m.AsControlChange();
-        switch (p.control_number)
-        {
-        case 1:
-            // CC 1 for cutoff.
-            flt.SetFreq(mtof((float)p.value));
-            fltLow.SetFreq(mtof((float)p.value) + 100.0f);
-            break;
-        case 2:
-            // CC 2 for res.
-            flt.SetRes(((float)p.value / 127.0f));
-            break;
-        default:
-            break;
-        }
-        break;
-    }
     default:
         break;
     }
@@ -212,6 +281,7 @@ int main(void)
     lfoAmp = 1.0f;
     lfoFreq = 0.1f;
     selfCycle = false;
+    step = 0;
 
     // Init everything
     pod.Init();
@@ -221,6 +291,14 @@ int main(void)
     flt.Init(sample_rate);
     fltLow.Init(sample_rate);
     lfo.Init(sample_rate);
+    tick.Init(tickFreq, sample_rate);
+    env.Init(sample_rate);
+    for (int i = 0; i < 16; i++)
+    {
+        sequence[i].active = false;
+        sequence[i].decay = 0.1f;
+        sequence[i].note = 110;
+    }
 
     // Set filter parameters
     flt.SetFreq(10000);
@@ -240,6 +318,9 @@ int main(void)
     lfo.SetAmp(1);
 
     // Set envelope parameters
+    env.SetTime(ADENV_SEG_ATTACK, 0.01);
+    env.SetMin(0.0);
+    env.SetMax(1);
 
     // set parameter parameters
     cutoffParam.Init(pod.knob1, 100, 20000, cutoffParam.LOGARITHMIC);
